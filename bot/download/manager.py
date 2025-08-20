@@ -1,3 +1,5 @@
+import os
+from time import time
 import logging
 from asyncio import create_task, sleep
 from textwrap import dedent
@@ -9,8 +11,29 @@ from pyrogram.enums import ParseMode
 from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
 from .. import BASE_FOLDER, MAX_SIMULTANEOUS_TRANSMISSIONS
-from ..util import humanReadableSize, humanReadableTime
+from ..util import humanReadableSize, humanReadableTime, safe_relpath
 from .types import Download
+
+from ..notifier import notify
+from ..messages import (
+    starting_download,
+    download_progress,
+    stopped,
+    download_success_user,
+    download_infected_user,
+    download_failed_user,
+    admin_download_clean,
+    admin_download_infected,
+    admin_scan_error,
+    admin_download_crashed,
+    notify_new_upload,
+    admin_upload_finished
+)
+from ..notify_helpers import media_resolution, channel_handle, author_display
+
+from ..scanner import scan_path
+from datetime import datetime, timedelta
+
 
 downloads: List[Download] = []
 running: int = 0
@@ -34,31 +57,134 @@ async def run():
             break
 
 
+
 async def downloadFile(download: Download):
     global running
     await download.progress_message.edit(
-        text=f"Starting download...",
+        text=starting_download(),
         parse_mode=ParseMode.MARKDOWN,
     )
     download.started = time()
-    result = await download.client.download_media(
-        message=download.from_message,
-        file_name=BASE_FOLDER + "/" + download.filename,
-        progress=createProgress(download.client),
-        progress_args=tuple([download]),
-    )
-    if isinstance(result, str):
-        seconds_took = download.last_update - download.started
+
+    # Resolve paths safely
+    clean_name = safe_relpath(download.filename)
+    target_path = os.path.join(BASE_FOLDER, clean_name)
+    logging.info("[DL] saving to %s (BASE_FOLDER=%s, raw filename=%r)", target_path, BASE_FOLDER, download.filename)
+
+    # Info for admin summary
+    res_str = media_resolution(download.from_message)
+    chan = channel_handle(download.from_message)
+    author = author_display(download.from_message)
+    RETENTION_DAYS = int(os.getenv("RETENTION_DAYS", "30") or "30")
+    delete_on = datetime.now() + timedelta(days=RETENTION_DAYS)
+
+    try:
+        result = await download.client.download_media(
+            message=download.from_message,
+            file_name=target_path,
+            progress=createProgress(download.client),
+            progress_args=(download,),
+        )
+        if not isinstance(result, str):
+            await download.progress_message.reply(
+                download_failed_user(download.filename),
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            # Admin: finished with crash
+            await notify(admin_upload_finished(
+                channel_handle=chan,
+                author=author,
+                filename=download.filename,
+                resolution=res_str,
+                size_h="unknown",
+                av_status="error",
+                retention_days=RETENTION_DAYS,
+                delete_on=None,
+            ))
+            return
+
+        real_filename = result
+        logging.info("[DL] pyrogram returned path: %s", real_filename)
+
+        # Success message to USER (backwards-compatible)
+        seconds_took = max(1e-6, (download.last_update - download.started))
         speed = humanReadableSize(download.size / seconds_took)
         time_took = humanReadableTime(int(seconds_took))
+        size_h = humanReadableSize(download.size)
+
         await download.progress_message.edit(
-            dedent(f"""
-                File `{download.filename}` downloaded.
-                Download of {humanReadableSize(download.size)} complete in {time_took}, it's an average speed of __{speed}/s__
-            """),
+            download_success_user(download.filename, size_h, time_took, speed),
             parse_mode=ParseMode.MARKDOWN,
         )
-    running -= 1
+
+        # === Antivirus check ===
+        av_status = "clean"
+        try:
+            res = scan_path(real_filename)
+            if res.status == "infected":
+                av_status = f"infected:{res.signature or 'unknown'}"
+                try:
+                    os.remove(real_filename)
+                except Exception:
+                    logging.exception("Failed to remove infected file %s", real_filename)
+
+                # Tell USER (unchanged)
+                await download.progress_message.reply(
+                    download_infected_user(download.filename, res.signature or "unknown"),
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+
+                # Admin: finished (infected/removed)
+                await notify(admin_upload_finished(
+                    channel_handle=chan,
+                    author=author,
+                    filename=download.filename,
+                    resolution=res_str,
+                    size_h=size_h,
+                    av_status=av_status,
+                    retention_days=RETENTION_DAYS,
+                    delete_on=None,   # removed by AV
+                ))
+                return
+
+            elif res.status == "error":
+                av_status = "error"
+
+        except Exception:
+            logging.exception("AV handling failed")
+            av_status = "error"
+
+        # Admin: finished (clean OR scan error)
+        await notify(admin_upload_finished(
+            channel_handle=chan,
+            author=author,
+            filename=download.filename,
+            resolution=res_str,
+            size_h=size_h,
+            av_status=av_status,         # "clean" | "error"
+            retention_days=RETENTION_DAYS,
+            delete_on=delete_on,         # planned deletion date
+        ))
+
+    except Exception:
+        logging.exception("Download pipeline crashed for %s", download.filename)
+        try:
+            await download.progress_message.reply(download_failed_user(download.filename))
+        except Exception:
+            pass
+        # Admin: finished with crash
+        await notify(admin_upload_finished(
+            channel_handle=chan,
+            author=author,
+            filename=download.filename,
+            resolution=res_str,
+            size_h="unknown",
+            av_status="error",
+            retention_days=RETENTION_DAYS,
+            delete_on=None,
+        ))
+    finally:
+        running -= 1
 
 
 def createProgress(client: Client):
@@ -66,7 +192,7 @@ def createProgress(client: Client):
         # This function is called every time that 1MB is downloaded
         if download.id in stop:
             await download.progress_message.edit(
-                text=f"Download of `{download.filename}` stopped!",
+                text=stopped(download.filename),
                 parse_mode=ParseMode.MARKDOWN,
             )
             stop.remove(download.id)
@@ -83,11 +209,14 @@ def createProgress(client: Client):
         avg_speed = received / (now - download.started)
         tte = int((total - received) / avg_speed)
         await download.progress_message.edit(
-            text=dedent(f"""
-            `{download.filename}`:
-            __{humanReadableSize(received)}/{humanReadableSize(total)} {percent:0.2f}%
-            {humanReadableSize(avg_speed)}/s {humanReadableTime(tte)} till complete__
-            """),
+            text=download_progress(
+                download.filename,
+                humanReadableSize(received),
+                humanReadableSize(total),
+                percent,
+                humanReadableSize(avg_speed),
+                humanReadableTime(tte),
+            ),
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=InlineKeyboardMarkup(
                 [[InlineKeyboardButton("Stop", callback_data=f"stop {download.id}")]]

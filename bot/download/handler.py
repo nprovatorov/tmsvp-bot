@@ -8,7 +8,14 @@ from .. import folder
 from .. import app, user
 from .manager import downloads
 from .types import Download
+from ..util import is_from_public_channel
+from .. import folder
 
+from ..notifier import notify
+from ..notify_helpers import media_resolution, message_link, channel_handle, author_display
+from ..messages import admin_upload_started, file_added, file_exists
+
+from ..util import humanReadableSize
 
 async def addFile(_, message: Message):
     caption = (message.caption or "").strip()
@@ -25,10 +32,9 @@ async def addFile(_, message: Message):
     file = os.path.join(folder.getPath(), filename)
     realFile = os.path.join(folder.get(), filename)
     if os.path.isfile(realFile):
-        return await message.reply(text=f"File `{file}` already exists!", quote=True)
-    progress = await message.reply(
-        f"File `{file}` added to list.", quote=True, parse_mode=ParseMode.MARKDOWN
-    )
+        return await message.reply(file_exists(file), quote=True, parse_mode=ParseMode.MARKDOWN)
+    progress = await message.reply(file_added(file), quote=True, parse_mode=ParseMode.MARKDOWN)
+
     downloads.append(
         Download(
             client=app,
@@ -38,6 +44,22 @@ async def addFile(_, message: Message):
             progress_message=progress,
         )
     )
+    res = media_resolution(message)
+    lnk = message_link(message)
+    chan = channel_handle(message)
+    author = author_display(message)
+
+    await notify(admin_upload_started(
+        channel_handle=chan,
+        filename=filename,
+        resolution=res,
+        link=lnk,
+        author=author,
+    ))
+    # # Notify private channel about the new upload
+    # channel = getattr(getattr(message, "chat", None), "username", "unknown")
+    # author = getattr(getattr(message, "from_user", None), "mention", "unknown")
+    # await notify(MSG.notify_new_upload(channel, filename, "unknown", author))
 
 
 async def addFileFromUser(fileMessage: Message, linkMessage: Message):

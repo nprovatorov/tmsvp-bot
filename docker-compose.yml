@@ -1,0 +1,38 @@
+services:
+  clamav:
+    image: clamav/clamav:stable
+    container_name: clamav
+    restart: unless-stopped
+    environment:
+      - CLAMD_STARTUP_TIMEOUT=240
+      - TZ=${TZ:-Europe/Kyiv}
+    volumes:
+      - clamdb:/var/lib/clamav
+      - ./downloads:/data:ro
+    healthcheck:
+      # Exec-form: succeeds (exit 0) when clamd is ready and /etc/hosts scans clean
+      test: ["CMD", "clamdscan", "--no-summary", "/etc/hosts"]
+      interval: 20s
+      timeout: 5s
+      retries: 20
+      start_period: 120s
+
+  tg-bot:
+    image: tg-downloader:latest
+    container_name: tg-downloader
+    restart: unless-stopped
+    depends_on:
+      clamav:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - CLAMAV_HOST=clamav
+      - CLAMAV_PORT=3310
+      - TZ=${TZ:-Europe/Kyiv}
+    volumes:
+      - ./downloads:/data
+      - ./config:/config
+
+volumes:
+  clamdb:

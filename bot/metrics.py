@@ -1,10 +1,11 @@
 # bot/metrics.py
 import os, json, logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 from collections import defaultdict, Counter
+from typing import Tuple, Optional
 
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
@@ -12,6 +13,8 @@ from . import CONFIG_FOLDER, folder
 from .sysinfo import diskUsage
 from .util import humanReadableSize
 from .notifier import notify
+from .messages import weekly_report_text
+
 
 # ========= Paths & constants =========
 
@@ -269,10 +272,11 @@ def _mk_dm_button_for_top_client(roll: WeekRollup) -> Optional[InlineKeyboardMar
         return None
     return InlineKeyboardMarkup([[InlineKeyboardButton("Send Message to top client", url=url)]])
 
-def _retention_outlook() -> Tuple[int, int, Optional[int]]:
+
+def _retention_outlook() -> Tuple[int, Optional[int]]:
     base = Path(folder.get())
     if not base.exists():
-        return (0, 0, None)
+        return (0, None)
 
     def age_days(p: Path) -> int:
         try:
@@ -291,119 +295,9 @@ def _retention_outlook() -> Tuple[int, int, Optional[int]]:
                 soon += 1
             if a > oldest:
                 oldest = a
-    return (soon, 0, oldest or None)
 
-def render_weekly_report_text(this: WeekRollup, last: Optional[WeekRollup], avg_growth_bytes_per_week: Optional[float]) -> str:
-    from datetime import timedelta  # local import to avoid changing file header
+    return (soon, oldest or None)
 
-    usage = diskUsage(folder.get())
-    used = usage.used
-    total = usage.capacity
-
-    # Week date range (Mon–Sun) for readability
-    week_start = datetime.fromisocalendar(this.iso_year, this.iso_week, 1)
-    week_end = week_start + timedelta(days=6)
-    date_range = f"{week_start.strftime('%b %d')}–{week_end.strftime('%b %d, %Y')}"
-
-    # Helper for WoW deltas
-    def _delta(cur: int, prev: int) -> str:
-        if prev <= 0:
-            return "n/a"
-        ch = ((cur - prev) / prev) * 100.0
-        sign = "↑" if ch > 0 else ("↓" if ch < 0 else "→")
-        return f"{sign} {abs(ch):.0f}%"
-
-    last_bytes = (last.total_clean_bytes if last else 0)
-    wow_bytes = _delta(this.total_clean_bytes, last_bytes)
-
-    # Busiest hour
-    busiest_hour = None
-    if this.started_by_hour:
-        busiest_hour = max(this.started_by_hour.items(), key=lambda kv: kv[1])[0]
-
-    # Top lists
-    top_by_bytes = sorted(this.per_client_bytes.items(), key=lambda kv: kv[1], reverse=True)[:5]
-    top_by_count = sorted(this.per_client_count.items(), key=lambda kv: kv[1], reverse=True)[:5]
-    top_ext = sorted(this.by_ext_count.items(), key=lambda kv: kv[1], reverse=True)[:6]
-
-    # Retention outlook
-    def _plural(n: int, word: str) -> str:
-        return f"{n} {word}{'' if n == 1 else 's'}"
-
-    soon, _, oldest = _retention_outlook()
-
-    lines: List[str] = []
-
-    # Header
-    lines.append(f"📊 **Weekly Bot Report** — ISO {this.iso_year}-W{this.iso_week:02d} ({date_range})")
-    lines.append("")
-
-    # Capacity
-    lines.append("**Capacity**")
-    lines.append(f"• Used / Total: {used} / {total}")
-    lines.append(f"• New data this week: {humanReadableSize(this.total_clean_bytes)} ({wow_bytes})")
-    lines.append("")
-
-    # Volume
-    lines.append("**Volume**")
-    lines.append(
-        "• Results: "
-        f"clean {_plural(this.clean_count, 'file')} • "
-        f"infected {_plural(this.infected_count, 'file')} • "
-        f"cancelled {_plural(this.cancelled_count, 'file')} • "
-        f"failed {_plural(this.error_count, 'file')}"
-    )
-    lines.append(f"• Started: {this.uploads_started} • Finished: {this.uploads_finished}")
-    if busiest_hour is not None:
-        lines.append(f"• Busiest hour: {busiest_hour:02d}:00")
-    if this.missing_desc_count:
-        lines.append(f"• Missing descriptions: {this.missing_desc_count}")
-    lines.append("")
-
-    # Clients
-    lines.append("**Clients**")
-    if top_by_bytes:
-        txt = " • ".join([f"{k} {humanReadableSize(v)}" for k, v in top_by_bytes])
-        lines.append(f"• By data: {txt}")
-    if top_by_count:
-        txt = " • ".join([f"{k} {v}" for k, v in top_by_count])
-        lines.append(f"• By count: {txt}")
-    if this.new_clients:
-        lines.append(f"• New this week: {', '.join(this.new_clients)}")
-    lines.append("")
-
-    # File mix
-    lines.append("**File mix**")
-    if top_ext:
-        txt = " • ".join([f"{k} {v}" for k, v in top_ext])
-        lines.append(f"• Types: {txt}")
-    if this.largest_files:
-        for (fn, sz, who) in this.largest_files:
-            safe_fn = (fn or "").replace("`", "ʼ")
-            lines.append(f"• Largest: `{safe_fn}` — {humanReadableSize(sz)} by {who}")
-    lines.append("")
-
-    # Retention
-    lines.append("**Retention**")
-    lines.append(f"• Purging soon (T–{RETENTION_NOTICE_DAYS}d): {_plural(soon, 'file')}")
-    lines.append(f"• Deleted this week: {_plural(this.deleted_files_count, 'file')} ({humanReadableSize(this.deleted_bytes)})")
-    if oldest is not None:
-        lines.append(f"• Oldest kept: {_plural(oldest, 'day')}")
-    lines.append("")
-
-    # Alerts
-    alerts: List[str] = []
-    if this.infected_count > 0:
-        alerts.append("⚠️ Infected uploads detected")
-    if this.scan_error_count > 0:
-        alerts.append("⚠️ Antivirus scan errors occurred")
-    if alerts:
-        lines.append("**Alerts**")
-        for a in alerts:
-            lines.append(f"• {a}")
-        lines.append("")
-
-    return "\n".join(lines).strip()
 
 def _avg_growth_last_weeks(incl_year: int, incl_week: int, window: int = 4) -> Optional[float]:
     keys = _prev_weeks_keys((incl_year, incl_week), max_weeks=window)
@@ -418,9 +312,69 @@ def generate_weekly_text_and_buttons() -> Tuple[str, Optional[InlineKeyboardMark
     y, w, _ = datetime.now().isocalendar()
     this = rollup_week(y, w)
     last = rollup_week(y, w-1) if w > 1 else None
-    avg_growth = _avg_growth_last_weeks(y, w, 4)
+    avg_growth = _avg_growth_last_weeks(y, w, 4)  # kept for future use if needed
 
-    text = render_weekly_report_text(this, last, avg_growth)
+    # Build date range label (Mon–Sun)
+    week_start = datetime.fromisocalendar(this.iso_year, this.iso_week, 1)
+    week_end = week_start + timedelta(days=6)
+    date_range = f"{week_start.strftime('%b %d')}–{week_end.strftime('%b %d, %Y')}"
+
+    # Current disk usage (strings)
+    usage = diskUsage(folder.get())
+    used = usage.used
+    total = usage.capacity
+
+    # WoW delta helper (produce string like "↑ 25%" / "↓ 10%" / "→ 0%"/"n/a")
+    def _delta(cur: int, prev: int) -> str:
+        if not prev:
+            return "n/a"
+        ch = ((cur - prev) / prev) * 100.0
+        sign = "↑" if ch > 0 else ("↓" if ch < 0 else "→")
+        return f"{sign} {abs(ch):.0f}%"
+
+    last_bytes = (last.total_clean_bytes if last else 0)
+    wow_bytes = _delta(this.total_clean_bytes, last_bytes)
+
+    # Top lists & busiest hour
+    busiest_hour = max(this.started_by_hour.items(), key=lambda kv: kv[1])[0] if this.started_by_hour else None
+    top_by_bytes = sorted(this.per_client_bytes.items(), key=lambda kv: kv[1], reverse=True)[:5]
+    top_by_count = sorted(this.per_client_count.items(), key=lambda kv: kv[1], reverse=True)[:5]
+    top_ext = sorted(this.by_ext_count.items(), key=lambda kv: kv[1], reverse=True)[:6]
+
+    # Retention outlook from filesystem
+    soon, oldest = _retention_outlook()
+
+    # Prepare payload for messages.weekly_report_text
+    payload = {
+        "iso_year": this.iso_year,
+        "iso_week": this.iso_week,
+        "date_range": date_range,
+        "used": used,
+        "total": total,
+        "total_clean_bytes": int(this.total_clean_bytes),
+        "wow_bytes": wow_bytes,
+        "uploads_started": int(this.uploads_started),
+        "uploads_finished": int(this.uploads_finished),
+        "clean_count": int(this.clean_count),
+        "infected_count": int(this.infected_count),
+        "cancelled_count": int(this.cancelled_count),
+        "error_count": int(this.error_count),
+        "scan_error_count": int(this.scan_error_count),
+        "busiest_hour": busiest_hour,
+        "missing_desc_count": int(this.missing_desc_count),
+        "top_by_bytes": list(top_by_bytes),   # List[Tuple[str,int]]
+        "top_by_count": list(top_by_count),   # List[Tuple[str,int]]
+        "top_ext": list(top_ext),             # List[Tuple[str,int]]
+        "largest_files": list(this.largest_files),  # List[Tuple[str,int,str]]
+        "retention_notice_days": RETENTION_NOTICE_DAYS,
+        "soon": int(soon),
+        "deleted_files_count": int(this.deleted_files_count),
+        "deleted_bytes": int(this.deleted_bytes),
+        "oldest": oldest,
+        "new_clients": list(this.new_clients or []),
+    }
+
+    text = weekly_report_text(payload)
     buttons = _mk_dm_button_for_top_client(this)
     return text, buttons
 

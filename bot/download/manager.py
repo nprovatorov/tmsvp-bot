@@ -17,11 +17,13 @@ from ..notifier import notify
 from ..messages import (
     starting_download,
     download_progress,
-    stopped,
+    stopped,                 # still used nowhere now, but keep import if other code uses it
     download_success_user,
     download_infected_user,
     download_failed_user,
     admin_upload_finished,
+    download_cancelled_user,
+    admin_upload_cancelled
 )
 from ..notify_helpers import media_resolution, channel_handle, author_display
 
@@ -33,18 +35,19 @@ running: int = 0
 # List of downloads to stop
 stop: List[int] = []
 
+
 def _contact_button_for_message(msg):
     u = getattr(msg, "from_user", None)
     if not u:
         return None
     uname = getattr(u, "username", None)
     if uname:
-        url = f"https://t.me/{uname}"
+        url = f"https://t.me/{uname}"          # universal (mobile/desktop/web)
     else:
         uid = getattr(u, "id", None)
         if not uid:
             return None
-        url = f"tg://user?id={uid}"
+        url = f"tg://user?id={uid}"            # native apps fallback
     return InlineKeyboardMarkup([[InlineKeyboardButton("Send Message", url=url)]])
 
 
@@ -103,12 +106,19 @@ async def downloadFile(download: Download):
             progress=createProgress(download.client),
             progress_args=(download,),
         )
+
+        # If the transmission was cancelled, Pyrogram returns a non-str/None or raises;
+        # createProgress() already handled user + admin notifications & cleanup.
         if not isinstance(result, str):
+            if download.cancelled:
+                logging.info("[DL] Download was cancelled by user; skipping failure/finished notifications.")
+                return
+
+            # Not cancelled: real failure
             await download.progress_message.reply(
                 download_failed_user(download.filename),
                 parse_mode=ParseMode.MARKDOWN,
             )
-            # Admin: finished with crash
             await notify(
                 admin_upload_finished(
                     channel_handle=chan,
@@ -119,7 +129,7 @@ async def downloadFile(download: Download):
                     av_status="error",
                     retention_days=RETENTION_DAYS,
                     delete_on=None,
-                    description=desc_final,  # include if present
+                    description=desc_final,
                 ),
                 reply_markup=buttons,
             )
@@ -150,7 +160,7 @@ async def downloadFile(download: Download):
                 except Exception:
                     logging.exception("Failed to remove infected file %s", real_filename)
 
-                # Tell USER (unchanged)
+                # Tell USER
                 await download.progress_message.reply(
                     download_infected_user(download.filename, res.signature or "unknown"),
                     parse_mode=ParseMode.MARKDOWN,
@@ -167,7 +177,7 @@ async def downloadFile(download: Download):
                         av_status=av_status,
                         retention_days=RETENTION_DAYS,
                         delete_on=None,           # removed by AV
-                        description=desc_final,   # include if present
+                        description=desc_final,
                     ),
                     reply_markup=buttons,
                 )
@@ -191,7 +201,7 @@ async def downloadFile(download: Download):
                 av_status=av_status,           # "clean" | "error"
                 retention_days=RETENTION_DAYS,
                 delete_on=delete_on,           # planned deletion date
-                description=desc_final,        # include if present
+                description=desc_final,
             ),
             reply_markup=buttons,
         )
@@ -202,7 +212,6 @@ async def downloadFile(download: Download):
             await download.progress_message.reply(download_failed_user(download.filename))
         except Exception:
             pass
-        # Admin: finished with crash
         await notify(
             admin_upload_finished(
                 channel_handle=chan,
@@ -213,7 +222,7 @@ async def downloadFile(download: Download):
                 av_status="error",
                 retention_days=RETENTION_DAYS,
                 delete_on=None,
-                description=desc_final,        # include if present
+                description=desc_final,
             ),
             reply_markup=buttons,
         )
@@ -223,13 +232,44 @@ async def downloadFile(download: Download):
 
 def createProgress(client: Client):
     async def progress(received: int, total: int, download: Download):
-        # This function is called every time that 1MB is downloaded
+        # If user pressed stop for this download id
         if download.id in stop:
-            await download.progress_message.edit(
-                text=stopped(download.filename),
-                parse_mode=ParseMode.MARKDOWN,
-            )
             stop.remove(download.id)
+            download.cancelled = True
+
+            # Remove any partial file
+            try:
+                target_path = os.path.join(BASE_FOLDER, safe_relpath(download.filename))
+                if os.path.exists(target_path):
+                    os.remove(target_path)
+                    logging.info("[DL] Cancelled: removed partial file %s", target_path)
+                else:
+                    logging.info("[DL] Cancelled: no partial file to remove for %s", target_path)
+            except Exception:
+                logging.exception("Failed to remove partial file on cancel")
+
+            # Tell the user
+            try:
+                await download.progress_message.edit(
+                    text=download_cancelled_user(download.filename),
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+            except Exception:
+                pass
+
+            # Tell admin with a DM button
+            try:
+                chan = channel_handle(download.from_message)
+                author = author_display(download.from_message)
+                buttons = _contact_button_for_message(download.from_message)
+                await notify(
+                    admin_upload_cancelled(chan, author, download.filename),
+                    reply_markup=buttons,
+                )
+            except Exception:
+                logging.exception("Failed to notify admin about cancellation")
+
+            # Stop the transmission and return
             client.stop_transmission()
             return
 
@@ -243,20 +283,25 @@ def createProgress(client: Client):
         avg_speed = received / max(1e-6, (now - download.started))
         tte = int((total - received) / max(1e-6, avg_speed)) if total else 0
 
-        await download.progress_message.edit(
-            text=download_progress(
-                download.filename,
-                humanReadableSize(received),
-                humanReadableSize(total),
-                percent,
-                humanReadableSize(avg_speed),
-                humanReadableTime(tte),
-            ),
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("Stop", callback_data=f"stop {download.id}")]]
-            ),
-        )
+        try:
+            await download.progress_message.edit(
+                text=download_progress(
+                    download.filename,
+                    humanReadableSize(received),
+                    humanReadableSize(total),
+                    percent,
+                    humanReadableSize(avg_speed),
+                    humanReadableTime(tte),
+                ),
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("Stop", callback_data=f"stop {download.id}")]]
+                ),
+            )
+        except Exception:
+            # If the message was deleted or can’t be edited, ignore and keep downloading
+            pass
+
         download.last_update = now
         download.size = total
 

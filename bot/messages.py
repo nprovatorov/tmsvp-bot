@@ -142,3 +142,20 @@ def admin_scan_error(filename: str) -> str:
 
 def admin_download_crashed(filename: str) -> str:
     return f"⚠️ Download crashed for `{filename}`"
+
+def download_cancelled_user(filename: str) -> str:
+    """
+    User-facing notice when an ongoing upload is cancelled.
+    Markdown-safe (escapes backticks in filename).
+    """
+    name = (filename or "").replace("`", "ʼ")
+    return f"🛑 Upload `{name}` was cancelled. File removed from server."
+
+def admin_upload_cancelled(channel_handle: str, author: str, filename: str) -> str:
+    fname = (filename or "").replace("`", "ʼ")
+    title = "🛑 Upload request cancelled by user"
+    return "\n".join([
+        title,
+        f"- From: #{channel_handle or 'unknown'} (account: {author})",
+        f"- File: `{fname}`",
+    ])

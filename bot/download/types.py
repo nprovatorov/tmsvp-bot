@@ -15,4 +15,5 @@ class Download:
     started: float = 0
     last_update: float = 0
     size: int = 0
-    description: Optional[str] = None  # NEW: caption/description for admin summary
+    description: Optional[str] = None
+    cancelled: bool = False

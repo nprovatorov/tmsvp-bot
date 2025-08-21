@@ -2,19 +2,16 @@ import os
 import logging
 from random import randint
 from pyrogram.enums import ParseMode
-from pyrogram.types import Message
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 
 from .. import app, folder
-from random import randint
 from ..notifier import notify
-from ..notify_helpers import media_resolution, message_link, channel_handle, author_display
+from ..notify_helpers import media_resolution, channel_handle, author_display
 from ..messages import admin_upload_started, file_added, file_exists
-from ..desc_cache import take as desc_take  # ok if you’re not using it; will just return None
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton  # ← import buttons
-
+from ..desc_cache import take as desc_take
 from .types import Download
-from .. import app, folder
 from .manager import downloads
+from ..metrics import append_event
 
 
 def _pick_filename_from_media(message: Message, default_name: str) -> str:
@@ -55,7 +52,7 @@ async def addFile(_, message: Message):
         filename = caption[1:].strip()
     else:
         filename = _pick_filename_from_media(message, filename)
-    filename = filename.lstrip("/\\")  # ← avoid absolute paths
+    filename = filename.lstrip("/\\")  # avoid absolute paths
 
     # Path checks
     file_display = os.path.join(folder.getPath(), filename)
@@ -79,12 +76,22 @@ async def addFile(_, message: Message):
         )
     )
 
+    append_event(
+        "upload_started",
+        user_id=getattr(getattr(message, "from_user", None), "id", None),
+        username=getattr(getattr(message, "from_user", None), "username", None),
+        chat=getattr(getattr(message, "chat", None), "username", None) or "private",
+        filename=filename,
+        has_desc=bool(desc),
+        media=getattr(getattr(message, "media", None), "value", None),
+    )
+
     # Admin “new upload request” with buttons
     res = media_resolution(message)
     chan = channel_handle(message)
     author = author_display(message)
     buttons = _contact_button_for(message)
-    
+
     await notify(
         admin_upload_started(
             channel_handle=chan,
@@ -95,6 +102,7 @@ async def addFile(_, message: Message):
         ),
         reply_markup=buttons
     )
+
 
 async def addFileFromUser(fileMessage: Message, linkMessage: Message):
     # Description from file caption (or cached)
@@ -111,7 +119,7 @@ async def addFileFromUser(fileMessage: Message, linkMessage: Message):
         filename = caption[1:].strip()
     else:
         filename = _pick_filename_from_media(fileMessage, filename)
-    filename = filename.lstrip("/\\")  # ← avoid absolute paths
+    filename = filename.lstrip("/\\")  # avoid absolute paths
 
     file_display = os.path.join(folder.getPath(), filename)
     real_file = os.path.join(folder.get(), filename)
@@ -134,12 +142,22 @@ async def addFileFromUser(fileMessage: Message, linkMessage: Message):
         )
     )
 
+    append_event(
+        "upload_started",
+        user_id=getattr(getattr(fileMessage, "from_user", None), "id", None),
+        username=getattr(getattr(fileMessage, "from_user", None), "username", None),
+        chat=getattr(getattr(fileMessage, "chat", None), "username", None) or "private",
+        filename=filename,
+        has_desc=bool(desc),
+        media=getattr(getattr(fileMessage, "media", None), "value", None),
+    )
+
     # Admin “new upload request” with buttons
     res = media_resolution(fileMessage)
     chan = channel_handle(fileMessage)
     author = author_display(fileMessage)
 
-    buttons = _contact_button_for(message)
+    buttons = _contact_button_for(fileMessage)  # <-- fixed
     await notify(
         admin_upload_started(
             channel_handle=chan,

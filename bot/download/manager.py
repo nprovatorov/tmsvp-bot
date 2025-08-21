@@ -17,17 +17,18 @@ from ..notifier import notify
 from ..messages import (
     starting_download,
     download_progress,
-    stopped,                 # still used nowhere now, but keep import if other code uses it
+    stopped,                 # kept for compatibility
     download_success_user,
     download_infected_user,
     download_failed_user,
     admin_upload_finished,
     download_cancelled_user,
-    admin_upload_cancelled
+    admin_upload_cancelled,
 )
 from ..notify_helpers import media_resolution, channel_handle, author_display
 
 from ..scanner import scan_path
+from ..metrics import append_event
 
 
 downloads: List[Download] = []
@@ -110,9 +111,21 @@ async def downloadFile(download: Download):
         # If the transmission was cancelled, Pyrogram returns a non-str/None or raises;
         # createProgress() already handled user + admin notifications & cleanup.
         if not isinstance(result, str):
-            if download.cancelled:
+            if getattr(download, "cancelled", False):
                 logging.info("[DL] Download was cancelled by user; skipping failure/finished notifications.")
                 return
+
+            append_event(
+                "upload_finished",
+                result="error",
+                user_id=getattr(getattr(download.from_message, "from_user", None), "id", None),
+                username=getattr(getattr(download.from_message, "from_user", None), "username", None),
+                chat=getattr(getattr(download.from_message, "chat", None), "username", None) or "private",
+                filename=download.filename,
+                size_bytes=int(download.size or 0),
+                duration_sec=float(max(0.0, (download.last_update - download.started))),
+                speed_mb_s=0.0,
+            )
 
             # Not cancelled: real failure
             await download.progress_message.reply(
@@ -140,14 +153,22 @@ async def downloadFile(download: Download):
 
         # Success message to USER (backwards-compatible)
         seconds_took = max(1e-6, (download.last_update - download.started))
-        speed = humanReadableSize(download.size / seconds_took)
+        speed_h = humanReadableSize(download.size / seconds_took)
         time_took = humanReadableTime(int(seconds_took))
         size_h = humanReadableSize(download.size)
 
         await download.progress_message.edit(
-            download_success_user(download.filename, size_h, time_took, speed),
+            download_success_user(download.filename, size_h, time_took, speed_h),
             parse_mode=ParseMode.MARKDOWN,
         )
+
+        # Precompute perf metrics used in any branch
+        duration_sec = max(0.0, (download.last_update - download.started))
+        try:
+            file_size_bytes = os.path.getsize(real_filename)
+        except Exception:
+            file_size_bytes = download.size or 0
+        avg_speed_mb_s = (file_size_bytes / max(1e-6, duration_sec)) / (1024 * 1024)
 
         # === Antivirus check ===
         av_status = "clean"
@@ -166,6 +187,17 @@ async def downloadFile(download: Download):
                     parse_mode=ParseMode.MARKDOWN,
                 )
 
+                append_event(
+                    "upload_finished",
+                    result="infected",
+                    user_id=getattr(getattr(download.from_message, "from_user", None), "id", None),
+                    username=getattr(getattr(download.from_message, "from_user", None), "username", None),
+                    chat=getattr(getattr(download.from_message, "chat", None), "username", None) or "private",
+                    filename=download.filename,
+                    size_bytes=int(file_size_bytes),
+                    duration_sec=float(duration_sec),
+                    speed_mb_s=float(avg_speed_mb_s),
+                )
                 # Admin: finished (infected/removed)
                 await notify(
                     admin_upload_finished(
@@ -184,11 +216,35 @@ async def downloadFile(download: Download):
                 return
 
             elif res.status == "error":
+                append_event(
+                    "upload_finished",
+                    result="scan_error",
+                    user_id=getattr(getattr(download.from_message, "from_user", None), "id", None),
+                    username=getattr(getattr(download.from_message, "from_user", None), "username", None),
+                    chat=getattr(getattr(download.from_message, "chat", None), "username", None) or "private",
+                    filename=download.filename,
+                    size_bytes=int(file_size_bytes),
+                    duration_sec=float(duration_sec),
+                    speed_mb_s=float(avg_speed_mb_s),
+                )
                 av_status = "error"
 
         except Exception:
             logging.exception("AV handling failed")
             av_status = "error"
+
+        # Log clean finish (or scan_error if above)
+        append_event(
+            "upload_finished",
+            result="clean" if av_status == "clean" else av_status,
+            user_id=getattr(getattr(download.from_message, "from_user", None), "id", None),
+            username=getattr(getattr(download.from_message, "from_user", None), "username", None),
+            chat=getattr(getattr(download.from_message, "chat", None), "username", None) or "private",
+            filename=download.filename,
+            size_bytes=int(file_size_bytes),
+            duration_sec=float(duration_sec),
+            speed_mb_s=float(avg_speed_mb_s),
+        )
 
         # Admin: finished (clean OR scan error)
         await notify(
@@ -212,6 +268,17 @@ async def downloadFile(download: Download):
             await download.progress_message.reply(download_failed_user(download.filename))
         except Exception:
             pass
+        append_event(
+            "upload_finished",
+            result="error",
+            user_id=getattr(getattr(download.from_message, "from_user", None), "id", None),
+            username=getattr(getattr(download.from_message, "from_user", None), "username", None),
+            chat=getattr(getattr(download.from_message, "chat", None), "username", None) or "private",
+            filename=download.filename,
+            size_bytes=int(download.size or 0),
+            duration_sec=float(max(0.0, (download.last_update - download.started))),
+            speed_mb_s=0.0,
+        )
         await notify(
             admin_upload_finished(
                 channel_handle=chan,
@@ -262,6 +329,19 @@ def createProgress(client: Client):
                 chan = channel_handle(download.from_message)
                 author = author_display(download.from_message)
                 buttons = _contact_button_for_message(download.from_message)
+
+                append_event(
+                    "upload_finished",
+                    result="cancelled",
+                    user_id=getattr(getattr(download.from_message, "from_user", None), "id", None),
+                    username=getattr(getattr(download.from_message, "from_user", None), "username", None),
+                    chat=getattr(getattr(download.from_message, "chat", None), "username", None) or "private",
+                    filename=download.filename,
+                    size_bytes=0,
+                    duration_sec=float(max(0.0, (time() - download.started))),
+                    speed_mb_s=0.0,
+                )
+
                 await notify(
                     admin_upload_cancelled(chan, author, download.filename),
                     reply_markup=buttons,

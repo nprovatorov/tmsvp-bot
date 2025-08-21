@@ -10,6 +10,7 @@ from pyrogram.types import Message
 from . import DL_FOLDER, download, folder, sysinfo, user
 from .util import checkAdmins
 from .desc_cache import put as desc_put
+from .metrics import send_weekly_report
 
 bot_help = """
 You can send files to me and I'll save it to your storage(where bot is hosted), when sending a file you can set caption as "> filename.ext" to rename it
@@ -35,6 +36,7 @@ def register(app: Client):
     addCommand(app, leaveFolder, "leave")
     addCommand(app, getFolder, "get")
     addCommand(app, addByLink, "add")
+    addCommand(app, weekly_report_cmd, "weekly")
 
     # ---- Handlers ----
     scope = filters.incoming & (filters.private | filters.group)
@@ -169,3 +171,12 @@ async def remember_desc(_, message: Message):
     """Cache a free-text description to attach to the next upload from this chat."""
     desc_put(message.chat.id, message.text)
     logging.info("remember_desc: cached text for chat %s: %r", message.chat.id, (message.text or "")[:120])
+
+async def weekly_report_cmd(_, message):
+    """Generate and send the weekly analytics report to the admin channel"""
+    try:
+        await send_weekly_report()
+        await message.reply("Weekly report sent to the admin channel.")
+    except Exception:
+        logging.exception("Failed to send weekly report")
+        await message.reply("Failed to generate weekly report.")

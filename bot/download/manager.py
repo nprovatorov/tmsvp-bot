@@ -1,9 +1,8 @@
 import os
-from time import time
 import logging
 from asyncio import create_task, sleep
-from textwrap import dedent
-from time import ctime, time
+from datetime import datetime, timedelta
+from time import time
 from typing import List
 
 from pyrogram.client import Client
@@ -22,17 +21,11 @@ from ..messages import (
     download_success_user,
     download_infected_user,
     download_failed_user,
-    admin_download_clean,
-    admin_download_infected,
-    admin_scan_error,
-    admin_download_crashed,
-    notify_new_upload,
-    admin_upload_finished
+    admin_upload_finished,
 )
 from ..notify_helpers import media_resolution, channel_handle, author_display
 
 from ..scanner import scan_path
-from datetime import datetime, timedelta
 
 
 downloads: List[Download] = []
@@ -40,11 +33,25 @@ running: int = 0
 # List of downloads to stop
 stop: List[int] = []
 
+def _contact_button_for_message(msg):
+    u = getattr(msg, "from_user", None)
+    if not u:
+        return None
+    uname = getattr(u, "username", None)
+    if uname:
+        url = f"https://t.me/{uname}"
+    else:
+        uid = getattr(u, "id", None)
+        if not uid:
+            return None
+        url = f"tg://user?id={uid}"
+    return InlineKeyboardMarkup([[InlineKeyboardButton("Send Message", url=url)]])
+
 
 async def run():
     global running
     while True:
-        for download in downloads:
+        for download in list(downloads):
             if running == MAX_SIMULTANEOUS_TRANSMISSIONS:
                 break
             create_task(downloadFile(download))
@@ -53,9 +60,8 @@ async def run():
             downloads.remove(download)
         try:
             await sleep(1)
-        except:
+        except Exception:
             break
-
 
 
 async def downloadFile(download: Download):
@@ -69,7 +75,10 @@ async def downloadFile(download: Download):
     # Resolve paths safely
     clean_name = safe_relpath(download.filename)
     target_path = os.path.join(BASE_FOLDER, clean_name)
-    logging.info("[DL] saving to %s (BASE_FOLDER=%s, raw filename=%r)", target_path, BASE_FOLDER, download.filename)
+    logging.info(
+        "[DL] saving to %s (BASE_FOLDER=%s, raw filename=%r)",
+        target_path, BASE_FOLDER, download.filename
+    )
 
     # Info for admin summary
     res_str = media_resolution(download.from_message)
@@ -77,6 +86,15 @@ async def downloadFile(download: Download):
     author = author_display(download.from_message)
     RETENTION_DAYS = int(os.getenv("RETENTION_DAYS", "30") or "30")
     delete_on = datetime.now() + timedelta(days=RETENTION_DAYS)
+
+    # Fallback description: prefer what handler set, else message.caption (if any)
+    desc_final = (
+        (download.description or "") or (getattr(download.from_message, "caption", None) or "")
+    ).strip() or None
+    if desc_final:
+        logging.info("[DL] admin description attached (first 120 chars): %r", desc_final[:120])
+
+    buttons = _contact_button_for_message(download.from_message)
 
     try:
         result = await download.client.download_media(
@@ -91,16 +109,20 @@ async def downloadFile(download: Download):
                 parse_mode=ParseMode.MARKDOWN,
             )
             # Admin: finished with crash
-            await notify(admin_upload_finished(
-                channel_handle=chan,
-                author=author,
-                filename=download.filename,
-                resolution=res_str,
-                size_h="unknown",
-                av_status="error",
-                retention_days=RETENTION_DAYS,
-                delete_on=None,
-            ))
+            await notify(
+                admin_upload_finished(
+                    channel_handle=chan,
+                    author=author,
+                    filename=download.filename,
+                    resolution=res_str,
+                    size_h="unknown",
+                    av_status="error",
+                    retention_days=RETENTION_DAYS,
+                    delete_on=None,
+                    description=desc_final,  # include if present
+                ),
+                reply_markup=buttons,
+            )
             return
 
         real_filename = result
@@ -135,16 +157,20 @@ async def downloadFile(download: Download):
                 )
 
                 # Admin: finished (infected/removed)
-                await notify(admin_upload_finished(
-                    channel_handle=chan,
-                    author=author,
-                    filename=download.filename,
-                    resolution=res_str,
-                    size_h=size_h,
-                    av_status=av_status,
-                    retention_days=RETENTION_DAYS,
-                    delete_on=None,   # removed by AV
-                ))
+                await notify(
+                    admin_upload_finished(
+                        channel_handle=chan,
+                        author=author,
+                        filename=download.filename,
+                        resolution=res_str,
+                        size_h=size_h,
+                        av_status=av_status,
+                        retention_days=RETENTION_DAYS,
+                        delete_on=None,           # removed by AV
+                        description=desc_final,   # include if present
+                    ),
+                    reply_markup=buttons,
+                )
                 return
 
             elif res.status == "error":
@@ -155,16 +181,20 @@ async def downloadFile(download: Download):
             av_status = "error"
 
         # Admin: finished (clean OR scan error)
-        await notify(admin_upload_finished(
-            channel_handle=chan,
-            author=author,
-            filename=download.filename,
-            resolution=res_str,
-            size_h=size_h,
-            av_status=av_status,         # "clean" | "error"
-            retention_days=RETENTION_DAYS,
-            delete_on=delete_on,         # planned deletion date
-        ))
+        await notify(
+            admin_upload_finished(
+                channel_handle=chan,
+                author=author,
+                filename=download.filename,
+                resolution=res_str,
+                size_h=size_h,
+                av_status=av_status,           # "clean" | "error"
+                retention_days=RETENTION_DAYS,
+                delete_on=delete_on,           # planned deletion date
+                description=desc_final,        # include if present
+            ),
+            reply_markup=buttons,
+        )
 
     except Exception:
         logging.exception("Download pipeline crashed for %s", download.filename)
@@ -173,16 +203,20 @@ async def downloadFile(download: Download):
         except Exception:
             pass
         # Admin: finished with crash
-        await notify(admin_upload_finished(
-            channel_handle=chan,
-            author=author,
-            filename=download.filename,
-            resolution=res_str,
-            size_h="unknown",
-            av_status="error",
-            retention_days=RETENTION_DAYS,
-            delete_on=None,
-        ))
+        await notify(
+            admin_upload_finished(
+                channel_handle=chan,
+                author=author,
+                filename=download.filename,
+                resolution=res_str,
+                size_h="unknown",
+                av_status="error",
+                retention_days=RETENTION_DAYS,
+                delete_on=None,
+                description=desc_final,        # include if present
+            ),
+            reply_markup=buttons,
+        )
     finally:
         running -= 1
 
@@ -198,16 +232,17 @@ def createProgress(client: Client):
             stop.remove(download.id)
             client.stop_transmission()
             return
-        # Only update download progress if the last update is 1 second old
-        # : This avoid flood on networks that is more than 1MB/s speed
+
+        # Only update download progress if the last update is 1 second old:
+        # avoids flood on very fast networks
         now = time()
-        if download.last_update != 0 and (time() - download.last_update) < running:
-            # Do not update message time from last_update is less than running download count
+        if download.last_update != 0 and (now - download.last_update) < running:
             return
-        download.last_update = now
-        percent = received / total * 100
-        avg_speed = received / (now - download.started)
-        tte = int((total - received) / avg_speed)
+
+        percent = (received / total * 100) if total else 0
+        avg_speed = received / max(1e-6, (now - download.started))
+        tte = int((total - received) / max(1e-6, avg_speed)) if total else 0
+
         await download.progress_message.edit(
             text=download_progress(
                 download.filename,

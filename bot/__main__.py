@@ -10,8 +10,7 @@ from .housekeeping import run_schedules
 async def main():
     logging.info("Registering commands...")
     commands.register(app)
-
-    logging.info("Starting bot...")
+    logging.info("Starting bot v2...")
     await app.start()
 
     if user:

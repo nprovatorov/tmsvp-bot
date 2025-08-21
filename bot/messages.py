@@ -4,16 +4,25 @@ from datetime import datetime
 
 def _md(s: str) -> str:
     # super-light markdown escaping for backticks only (filenames)
-    return s.replace("`", "ʼ")
+    return (s or "").replace("`", "ʼ")
 
-def admin_upload_started(channel_handle: str | None, filename: str, resolution: str | None, link: str | None, author: str) -> str:
+def admin_upload_started(channel_handle, filename, resolution, link, author) -> str:
     title = f"🆕 New Upload Request from #{channel_handle or 'unknown'}"
-    parts = [
+    return "\n".join([
         title,
-        f"- File: `{_md(filename)}`" + (f" ({resolution})" if resolution else ""),
-        f"- From: {author}" + (f" · [open]({link})" if link else ""),
-    ]
-    return "\n".join(parts)
+        f"- File: `{(filename or '').replace('`','ʼ')}`" + (f" ({resolution})" if resolution else ""),
+        f"- From: {author}",
+    ])
+
+# messages.py
+
+from datetime import datetime
+
+def _md(s: str) -> str:
+    # Minimal escaping for backticks so filenames/signatures don't break Markdown
+    return (s or "").replace("`", "ʼ")
+
+from datetime import datetime
 
 def admin_upload_finished(
     channel_handle: str | None,
@@ -24,6 +33,7 @@ def admin_upload_finished(
     av_status: str,          # "clean" | "infected:<sig>" | "error"
     retention_days: int,
     delete_on: datetime | None,
+    description: str | None = None,   # ← make sure this param exists
 ) -> str:
     title = "📥 File Download Finished"
     lines = [title]
@@ -31,21 +41,26 @@ def admin_upload_finished(
     lines.append(f"- File: `{_md(filename)}`" + (f" ({resolution})" if resolution else ""))
     lines.append(f"- Size: **{size_h}**")
 
-    # Antivirus line with emoji
     if av_status.startswith("infected:"):
         sig = av_status.split(":", 1)[1]
         lines.append(f"- AV: ❌ Infected (`{_md(sig)}`)")
-        # Status line for infection
         lines.append("- Status: removed by antivirus")
     elif av_status == "error":
-        lines.append(f"- AV: ⚠️ Scan error (kept)")
-        # File status (kept; still under retention)
+        lines.append("- AV: ⚠️ Scan error (kept)")
         if delete_on:
             lines.append(f"- Status: retained for {retention_days} days · auto-delete on **{delete_on:%Y-%m-%d}**")
     else:
-        lines.append(f"- AV: ✅ Clean")
+        lines.append("- AV: ✅ Clean")
         if delete_on:
             lines.append(f"- Status: retained for {retention_days} days · auto-delete on **{delete_on:%Y-%m-%d}**")
+
+    if description:
+        desc = description.strip()
+        if len(desc) > 1500:
+            desc = desc[:1500] + "…"
+        lines.append("")
+        lines.append("**Description**")
+        lines.append(_md(desc))
 
     return "\n".join(lines)
 

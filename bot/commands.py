@@ -1,15 +1,15 @@
 import logging
 from textwrap import dedent
 
+from pyrogram import filters
 from pyrogram.client import Client
 from pyrogram.enums import ParseMode
-from pyrogram.filters import command, document, media
-from pyrogram.handlers.callback_query_handler import CallbackQueryHandler
-from pyrogram.handlers.message_handler import MessageHandler
+from pyrogram.handlers import CallbackQueryHandler, MessageHandler
 from pyrogram.types import Message
 
 from . import DL_FOLDER, download, folder, sysinfo, user
 from .util import checkAdmins
+from .desc_cache import put as desc_put
 
 bot_help = """
 You can send files to me and I'll save it to your storage(where bot is hosted), when sending a file you can set caption as "> filename.ext" to rename it
@@ -26,6 +26,8 @@ My commands are:\n\n"""
 
 
 def register(app: Client):
+    logging.info("Registering commands...")
+
     addCommand(app, start, "start")
     addCommand(app, botHelp, "help")
     addCommand(app, usage, "usage")
@@ -33,16 +35,41 @@ def register(app: Client):
     addCommand(app, leaveFolder, "leave")
     addCommand(app, getFolder, "get")
     addCommand(app, addByLink, "add")
+
+    # ---- Handlers ----
+    scope = filters.incoming & (filters.private | filters.group)
+
+    # 1) Media uploads (documents, photos, videos, animations, audio, voice)
+    media_filters = filters.media
     app.add_handler(
-        MessageHandler(checkAdmins(download.handler.addFile), document | media)
+        MessageHandler(
+            checkAdmins(download.handler.addFile),   # PUBLIC_MODE allows everyone; otherwise admins only
+            media_filters & scope
+        ),
+        group=0,
     )
+    logging.info("commands: media handler registered")
+
+    # 2) Description cache: plain text that isn't a command (stored silently)
+    text_filters = filters.text & ~filters.command(["start", "help", "usage", "add", "use", "leave", "get"])
+    app.add_handler(
+        MessageHandler(
+            remember_desc,
+            text_filters & scope
+        ),
+        group=1,
+    )
+    logging.info("commands: description cache handler registered")
+
+    # 3) Callback (e.g., stop button)
     app.add_handler(CallbackQueryHandler(download.manager.stopDownload))
+    logging.info("commands: callback handler registered")
 
 
 def addCommand(app, func, cmd):
     global bot_help
     bot_help += f"/{cmd} - {dedent(func.__doc__ or 'No description').strip()}\n"
-    app.add_handler(MessageHandler(checkAdmins(func), command(cmd)))
+    app.add_handler(MessageHandler(checkAdmins(func), filters.command(cmd)))
 
 
 async def start(_, message: Message):
@@ -80,16 +107,12 @@ async def addByLink(_, message: Message):
         return
     # Structure can be: [chatID, messageID] or [chatID, topicID, messageID]
     ids = linkParts[1].split("/")
-    chatID = int(f"-100{ids[0]}")  # First item is domain and second is chat id
-    messageID = int(ids[-1])  # Last item is always message id
+    chatID = int(f"-100{ids[0]}")
+    messageID = int(ids[-1])
     try:
         messages = await user.get_messages(chatID, [messageID])
     except Exception as error:
-        logging.error(
-            "Getting messages from user",
-            {"chatID": chatID, "messageID": messageID},
-            error,
-        )
+        logging.error("Getting messages from user", {"chatID": chatID, "messageID": messageID}, error)
         await message.reply("Message not found on normal user!")
         return
     if not messages[0].media:
@@ -140,3 +163,9 @@ async def getFolder(_, message: Message):
     """Get actual download folder"""
     path = folder.getPath()
     await message.reply(f"I'm on the `{path}` folder")
+
+
+async def remember_desc(_, message: Message):
+    """Cache a free-text description to attach to the next upload from this chat."""
+    desc_put(message.chat.id, message.text)
+    logging.info("remember_desc: cached text for chat %s: %r", message.chat.id, (message.text or "")[:120])

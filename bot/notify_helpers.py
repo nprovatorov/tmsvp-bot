@@ -46,17 +46,34 @@ def channel_handle(msg: Message) -> str:
         return getattr(chat, "username", None) or "unknown"
     except Exception:
         return "unknown"
+        
+def _md_escape_name(s: str) -> str:
+    """Escape characters that break Telegram Markdown links."""
+    if not s:
+        return "user"
+    # Legacy Markdown: [],() and backticks are risky in link text; also tame *_ which format text
+    return (s
+            .replace("[", "⟮").replace("]", "⟯")
+            .replace("(", "⟨").replace(")", "⟩")
+            .replace("`", "ʼ")
+            .replace("*", "·").replace("_", "ˍ"))
 
 def author_display(msg: Message) -> str:
+    """
+    Return a Markdown-friendly author string:
+      - Prefer @username
+      - Else a Markdown link to the user ID with a safely-escaped name
+    """
     try:
         u = getattr(msg, "from_user", None)
-        # prefer mention if available, fall back to @username or id
-        if u and getattr(u, "mention", None):
-            return u.mention
-        if u and getattr(u, "username", None):
+        if not u:
+            return "unknown"
+        if getattr(u, "username", None):
             return f"@{u.username}"
-        if u and getattr(u, "id", None):
-            return str(u.id)
+        uid = getattr(u, "id", None)
+        if uid:
+            name = " ".join(filter(None, [getattr(u, "first_name", None), getattr(u, "last_name", None)])).strip() or "user"
+            return f"[{_md_escape_name(name)}](tg://user?id={uid})"
     except Exception:
         pass
     return "unknown"

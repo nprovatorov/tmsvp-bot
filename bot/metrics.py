@@ -308,23 +308,44 @@ def _avg_growth_last_weeks(incl_year: int, incl_week: int, window: int = 4) -> O
         return None
     return sum(growths) / max(1, len(growths))
 
-def generate_weekly_text_and_buttons() -> Tuple[str, Optional[InlineKeyboardMarkup]]:
-    y, w, _ = datetime.now().isocalendar()
-    this = rollup_week(y, w)
-    last = rollup_week(y, w-1) if w > 1 else None
-    avg_growth = _avg_growth_last_weeks(y, w, 4)  # kept for future use if needed
+def generate_weekly_text_and_buttons(mode: str = "completed") -> Tuple[str, Optional[InlineKeyboardMarkup]]:
+    """
+    Build the weekly report text/buttons.
 
-    # Build date range label (Mon–Sun)
-    week_start = datetime.fromisocalendar(this.iso_year, this.iso_week, 1)
-    week_end = week_start + timedelta(days=6)
+    mode:
+      - "completed" (default): report the last fully completed ISO week (Mon–Sun),
+        i.e., use 'yesterday' as the reference date so Mondays produce last week's report.
+      - "current": report the in-progress current ISO week (useful for ad-hoc checks).
+    """
+    from datetime import timedelta  # local import to avoid header edits
+
+    # Pick reference date
+    now = datetime.now()
+    ref = now - timedelta(days=1) if mode == "completed" else now
+
+    # This (target) week = ISO week of the reference date
+    y, w, _ = ref.isocalendar()
+    this = rollup_week(y, w)
+
+    # Last week = ISO week of (ref - 7 days)
+    prev_ref = ref - timedelta(days=7)
+    y_prev, w_prev, _ = prev_ref.isocalendar()
+    last = rollup_week(y_prev, w_prev)
+
+    # Optional: keep avg growth calculation (still based on target week)
+    avg_growth = _avg_growth_last_weeks(y, w, 4)
+
+    # Human-friendly date range (Mon–Sun) for *this* reported week
+    week_start = datetime.fromisocalendar(y, w, 1)
+    week_end   = week_start + timedelta(days=6)
     date_range = f"{week_start.strftime('%b %d')}–{week_end.strftime('%b %d, %Y')}"
 
-    # Current disk usage (strings)
+    # Disk usage
     usage = diskUsage(folder.get())
     used = usage.used
     total = usage.capacity
 
-    # WoW delta helper (produce string like "↑ 25%" / "↓ 10%" / "→ 0%"/"n/a")
+    # WoW delta helper
     def _delta(cur: int, prev: int) -> str:
         if not prev:
             return "n/a"
@@ -339,15 +360,15 @@ def generate_weekly_text_and_buttons() -> Tuple[str, Optional[InlineKeyboardMark
     busiest_hour = max(this.started_by_hour.items(), key=lambda kv: kv[1])[0] if this.started_by_hour else None
     top_by_bytes = sorted(this.per_client_bytes.items(), key=lambda kv: kv[1], reverse=True)[:5]
     top_by_count = sorted(this.per_client_count.items(), key=lambda kv: kv[1], reverse=True)[:5]
-    top_ext = sorted(this.by_ext_count.items(), key=lambda kv: kv[1], reverse=True)[:6]
+    top_ext      = sorted(this.by_ext_count.items(),   key=lambda kv: kv[1], reverse=True)[:6]
 
     # Retention outlook from filesystem
     soon, oldest = _retention_outlook()
 
-    # Prepare payload for messages.weekly_report_text
+    # Prepare payload for messages.weekly_report_text (formatting only)
     payload = {
-        "iso_year": this.iso_year,
-        "iso_week": this.iso_week,
+        "iso_year": y,
+        "iso_week": w,
         "date_range": date_range,
         "used": used,
         "total": total,
@@ -362,10 +383,10 @@ def generate_weekly_text_and_buttons() -> Tuple[str, Optional[InlineKeyboardMark
         "scan_error_count": int(this.scan_error_count),
         "busiest_hour": busiest_hour,
         "missing_desc_count": int(this.missing_desc_count),
-        "top_by_bytes": list(top_by_bytes),   # List[Tuple[str,int]]
-        "top_by_count": list(top_by_count),   # List[Tuple[str,int]]
-        "top_ext": list(top_ext),             # List[Tuple[str,int]]
-        "largest_files": list(this.largest_files),  # List[Tuple[str,int,str]]
+        "top_by_bytes": list(top_by_bytes),
+        "top_by_count": list(top_by_count),
+        "top_ext": list(top_ext),
+        "largest_files": list(this.largest_files),
         "retention_notice_days": RETENTION_NOTICE_DAYS,
         "soon": int(soon),
         "deleted_files_count": int(this.deleted_files_count),
@@ -377,6 +398,7 @@ def generate_weekly_text_and_buttons() -> Tuple[str, Optional[InlineKeyboardMark
     text = weekly_report_text(payload)
     buttons = _mk_dm_button_for_top_client(this)
     return text, buttons
+
 
 async def send_weekly_report():
     text, buttons = generate_weekly_text_and_buttons()

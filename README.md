@@ -1,80 +1,173 @@
-[Pyrogram Framework]: <https://github.com/pyrogram/pyrogram>
-[My Telegram]: <https://my.telegram.org>
-[BotFather]: <https://t.me/BotFather>
+# Telegram Downloader Bot on Synology NAS (Docker Compose)
 
+This project deploys the **Telegram downloader bot** together with **ClamAV** on a Synology NAS using Docker Compose. It allows downloading files from Telegram directly to your NAS, using [Pyrogram Framework](https://github.com/pyrogram/pyrogram) for MTProto support (up to 4GB per file).
 
-# Telegram downloader
+The setup keeps **code and configs off shared SMB volumes**, while storing downloads in a shared folder for easy access.
 
-This is a *simple* bot to download telegram files directly to your own server
-without needing to keep telegram open or using telegram-cli, this uses Telegram's
-MTProto protocol to download files up to 4GB using the [Pyrogram Framework].
+---
 
-## Setup
+## 🚀 Prerequisites
 
-To setup this bot on your own server you'll need a Telegram API ID/Hash, it can be
-created at [My Telegram] website, do this before continue
+* Synology DSM with **Docker** and **docker-compose** installed (via Package Center).
+* SSH access enabled:
+  DSM → **Control Panel → Terminal & SNMP → Enable SSH service**.
+* An existing shared folder for downloads, e.g. `/volume2/Quaratine/incoming`.
+* A **Telegram Bot Token** created via [BotFather](https://t.me/BotFather).
+* A **Telegram API ID & Hash** generated at [My Telegram](https://my.telegram.org/auth).
 
-If you want to run this bot on a docker server follow [Environment variables](#Environment%20variables)
-guide and then [Docker install](#Docker%20install) guide.
+> Adjust paths if your download folder is different. The guide uses the path above verbatim.
 
-## Install dependencies
+---
 
-To install all needed dependencies use pip:
+## 🔑 Setup Instructions
 
-```bash
-python3 -m pip install -r requirements.txt
-```
-
-If you have any issue, try to install build-essentials in your system, the `psutil`
-lib sometimes needs to be builded locally.
-
-## Environment variables
-
-Observation: *This bot support dot files(`.env`)*
-
-Now that you've your own ID/Hash it has to be passed to `TELEGRAM_API_ID` and
-`TELEGRAM_API_HASH` environment variables, you also need to set the bot token(create
-one [here][BotFather]) as `BOT_TOKEN`, and if you want to download files from channels
-that doesn't allow forwarding/copying content you need to set `PHONE_NUMBER` with your
-number that is used on a telegram account that is allowed to access the content you want
-to download.
-
-The default **download** folder is `/data`, if you want to set another location define that
-as `DOWNLOAD_FOLDER`, default **session** storage path is `/config` but it can be set by
-`CONFIG_FOLDER`, this can be usefull for saving session across updates.
-
-You also need to set the bot administrator list using `ADMINS`, use spaces to separate
-everyone.
-
-## Running
-
-To run this bot it has to be started as a module, to this use `-m` flag:
+### 1. SSH into the NAS
 
 ```bash
-python3 -m bot
+ssh <username>@<NAS_IP>
+# If you’re using a custom SSH port:
+ssh -p <PORT> <username>@<NAS_IP>
 ```
 
-When you wanna stop the bot, press CTRL+\\
-
-## Docker run
-
-This bot is so simple that you only need to set some environment variables and mount a
-folder inside the container to keep your downloads, for this, use this command replacing
-values with your owns:
+### 2. Become root
 
 ```bash
-# Build a docker image to your own server
-docker build -t telegram-downloader .
-
-# Now run this
-docker run \
-    -it `# optional, use -d if you won't use your account to download content` \
-    -v /home/$USER/TDownloader/data:/data \
-    -v /home/$USER/TDownloader/config:/config \
-    -e TELEGRAM_API_ID=123456 \
-    -e TELEGRAM_API_HASH="yourTelegramAPIHash" \
-    -e BOT_TOKEN="yourBotToken" \
-    -e PHONE_NUMBER="yourPhoneNumber" `# optional` \
-    -e ADMINS="@yourTelegramUsername" \
-    telegram-downloader
+sudo -i
 ```
+
+### 3. Create working directory
+
+```bash
+mkdir -p /var/local/src/tm-bot
+```
+
+### 4. Clone the repository (via one-shot git container)
+
+```bash
+REPO_URL="https://github.com/tvorchamaysternya/tmsvp-bot.git"
+docker run --rm -v /var/local/src:/git alpine/git \
+  clone --depth 1 "$REPO_URL" /git/tm-bot
+```
+
+### 5. Create the `.env` file
+
+Create `/var/local/src/tm-bot/.env` with the following content (replace placeholders with your real values):
+
+```ini
+PUBLIC_MODE=true
+
+BOT_TOKEN=<your bot token>
+TELEGRAM_API_ID=<your telegram api id>
+TELEGRAM_API_HASH=<your telegram api hash>
+DOWNLOAD_FOLDER=/data
+CONFIG_FOLDER=/config
+PUBLIC_CHANNELS=<name of public bot>
+PRIVATE_CHANNEL_ID=<id of private channel>
+RETENTION_DAYS=30
+RETENTION_NOTICE_DAYS=2
+DISK_USAGE_DAY=Monday
+DISK_USAGE_HOUR=10
+TZ=Europe/Kyiv
+DEBUG=1
+```
+
+You can create the file quickly:
+
+```bash
+cat > /var/local/src/tm-bot/.env <<'EOF'
+PUBLIC_MODE=true
+
+BOT_TOKEN=<your bot token>
+TELEGRAM_API_ID=<your telegram api id>
+TELEGRAM_API_HASH=<your telegram api hash>
+DOWNLOAD_FOLDER=/data
+CONFIG_FOLDER=/config
+PUBLIC_CHANNELS=<name of public bot>
+PRIVATE_CHANNEL_ID=<id of private channel>
+RETENTION_DAYS=30
+RETENTION_NOTICE_DAYS=2
+DISK_USAGE_DAY=Monday
+DISK_USAGE_HOUR=10
+TZ=Europe/Kyiv
+DEBUG=1
+EOF
+```
+
+---
+
+## 📦 Environment Variables
+
+* **BOT\_TOKEN** → from [BotFather](https://t.me/BotFather).
+* **TELEGRAM\_API\_ID** / **TELEGRAM\_API\_HASH** → from [My Telegram](https://my.telegram.org/auth).
+* **PUBLIC\_MODE** → `true` to allow anyone, or `false` for restricted.
+* **DOWNLOAD\_FOLDER** → inside container path for downloads (mapped to NAS path).
+* **CONFIG\_FOLDER** → inside container path for configs.
+* **PUBLIC\_CHANNELS** / **PRIVATE\_CHANNEL\_ID** → specify bot access.
+* **RETENTION\_DAYS**, **RETENTION\_NOTICE\_DAYS** → cleanup configuration.
+* **DISK\_USAGE\_DAY**, **DISK\_USAGE\_HOUR** → schedule for usage reports.
+* **TZ** → timezone.
+* **DEBUG** → `1` for debug logging.
+
+---
+
+## 📁 Prepare Folders & Permissions
+
+```bash
+mkdir -p /var/local/src/tm-bot/config
+mkdir -p /volume2/Quaratine/incoming
+
+chmod 775 /var/local/src/tm-bot/config /volume2/Quaratine/incoming
+# Example (only if needed):
+# chown -R 1000:1000 /var/local/src/tm-bot/config /volume2/Quaratine/incoming
+```
+
+---
+
+## 🐳 Docker Install
+
+### Build and start containers
+
+```bash
+cd /var/local/src/tm-bot
+docker-compose up -d --build
+```
+
+This will:
+
+* Build the `tg-downloader` image from the local Dockerfile.
+* Start `clamav` and `tg-bot` containers with `restart: unless-stopped`.
+
+---
+
+## ✅ Verification
+
+* Tail logs from all services:
+
+  ```bash
+  cd /var/local/src/tm-bot
+  docker-compose logs --tail=200 -f
+  ```
+
+* Check running containers:
+
+  ```bash
+  docker ps
+  ```
+
+---
+
+## 📂 Paths Overview
+
+* **Downloads:** `/volume2/Quaratine/incoming`
+* **Config files:** `/var/local/src/tm-bot/config`
+* **Environment file:** `/var/local/src/tm-bot/.env`
+
+Containers are configured with `restart: unless-stopped` → they **auto-start on reboot** and **auto-restart on failures**.
+
+---
+
+## 📖 References
+
+* [Pyrogram Framework](https://github.com/pyrogram/pyrogram) — Telegram MTProto client used by this bot.
+* [My Telegram](https://my.telegram.org/auth) — Create your API ID and Hash.
+* [BotFather](https://t.me/BotFather) — Create and manage your Telegram bots.
